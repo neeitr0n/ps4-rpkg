@@ -16,7 +16,7 @@ PS4-rPKG is a local network tool for sending and installing PKG packages from a 
 
 ## Requirements
 
-- Linux computer running Python 3.
+- Computer running Python 3.
 - PlayStation 4 and computer connected to the same local network.
 - GoldHEN with a compatible Remote Package Installer (RPI) environment.
 - BinLoader enabled on the console if automatic RPI payload loading is needed.
