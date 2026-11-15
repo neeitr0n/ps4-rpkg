@@ -2,7 +2,7 @@
 
 Remote PKG installer for PlayStation 4.
 
-PS4-rPKG is a local network tool for sending and installing PKG packages from a Linux computer to a PlayStation 4 console. It provides a web interface for selecting packages, managing the installation queue and monitoring file transfers.
+PS4-rPKG is a local network tool for sending and installing PKG packages from a computer to a PlayStation 4 console. It provides a web interface for selecting packages, managing the installation queue and monitoring file transfers.
 
 ## Features
 
