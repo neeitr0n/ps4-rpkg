@@ -12,7 +12,7 @@ PS4-rPKG is a local network tool for sending and installing PKG packages from a 
 - Send installation requests to the console through Remote Package Installer (RPI).
 - Transfer package files over HTTP and display transfer progress.
 - Attempt to start RPI through BinLoader if the RPI service is not already available.
-- Installing PS4 games while the console is in Rest Mode. 
+- Installing games in Rest Mode (requires the "Stay Connected to the Internet" setting to be enabled)
 
 ## Requirements
 
