@@ -15,7 +15,7 @@ from tkinter import filedialog
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
-PS4_IP = "192.168.2.10"
+PS4_IP = "192.168.0.2"
 
 RPI_PORT = 12800
 HTTP_PORT = 8080
@@ -36,6 +36,7 @@ PAYLOAD_B64 = "6ToYAABIg+woZEiLBCUoAAAASIlEJBgxwDHASIlEJAhIjUwkGEiJRCQQSI1EJAiAP
 
 SELECTED_FILES = []
 FILES_MAP = {}
+FILES_LAST_ACCESS = {}
 PROGRESS_MAP = {}
 
 PROGRESS_LOCK = threading.Lock()
@@ -44,6 +45,8 @@ PROGRESS_DONE_TTL = 3.0
 PROGRESS_SPEED_IDLE_TIMEOUT = 3.0
 PROGRESS_ACTIVE_IDLE_TIMEOUT = 10.0
 PROGRESS_QUEUED_TIMEOUT = 90.0
+
+FILE_REGISTRATION_TTL = 3600.0
 
 HTML_PAGE = Path(__file__).parent / "index.html"
 
@@ -68,34 +71,86 @@ def is_port_open(ip: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+# После выхода PS4 из Rest Mode сеть и сервисы GoldHEN могут подниматься
+# не одновременно. Не считаем единичный отказ TCP-подключения окончательным.
+BINLOADER_WAIT_TIMEOUT = 20.0
+BINLOADER_CONNECT_TIMEOUT = 1.5
+BINLOADER_RETRY_INTERVAL = 1.0
+RPI_PROBE_TIMEOUT = 0.75
+RPI_START_TIMEOUT = 12.0
+
+
 def ensure_rpi_running(ps4_ip: str, rpi_port: int = 12800) -> tuple[bool, str]:
-    if is_port_open(ps4_ip, rpi_port, timeout=1.0):
+    # RPI уже запущен: повторно внедрять payload не нужно.
+    if is_port_open(ps4_ip, rpi_port, timeout=RPI_PROBE_TIMEOUT):
         return True, "RPI уже активен"
 
     payload_bytes = base64.b64decode(PAYLOAD_B64)
-    injected = False
+    wait_deadline = time.monotonic() + BINLOADER_WAIT_TIMEOUT
+    last_errors = {port: "подключение ещё не проверялось" for port in BINLOADER_PORTS}
+    connected_port = None
 
-    for loader_port in BINLOADER_PORTS:
-        try:
-            with socket.create_connection((ps4_ip, loader_port), timeout=3.0) as s:
-                s.sendall(payload_bytes)
-                injected = True
-                break
-        except OSError:
-            continue
+    # Ждём, пока PS4 после пробуждения снова начнёт принимать TCP-соединения.
+    while time.monotonic() < wait_deadline:
+        # Возможно, RPI успел восстановиться сам, пока мы ждали.
+        if is_port_open(ps4_ip, rpi_port, timeout=RPI_PROBE_TIMEOUT):
+            return True, "RPI стал доступен после пробуждения"
 
-    if not injected:
+        for loader_port in BINLOADER_PORTS:
+            try:
+                sock = socket.create_connection(
+                    (ps4_ip, loader_port),
+                    timeout=BINLOADER_CONNECT_TIMEOUT
+                )
+            except OSError as err:
+                last_errors[loader_port] = f"{type(err).__name__}: {err}"
+                continue
+
+            # TCP-соединение установлено. Если отправка началась, но оборвалась,
+            # не пробуем второй порт: первый payload мог быть принят частично.
+            try:
+                with sock:
+                    sock.sendall(payload_bytes)
+            except OSError as err:
+                return (
+                    False,
+                    f"BinLoader на порту {loader_port} принял TCP-соединение, "
+                    f"но отправка payload завершилась ошибкой: "
+                    f"{type(err).__name__}: {err}"
+                )
+
+            connected_port = loader_port
+            break
+
+        if connected_port is not None:
+            break
+
+        time.sleep(BINLOADER_RETRY_INTERVAL)
+
+    if connected_port is None:
+        details = "; ".join(
+            f"{port}: {error}" for port, error in last_errors.items()
+        )
         return (
             False,
-            "Не удалось подключиться к BinLoader (порты 9090/9020 закрыты). Проверьте IP или включите BinLoader в GoldHEN.",
+            f"BinLoader не принял соединение за {BINLOADER_WAIT_TIMEOUT:.0f} с. "
+            f"Ошибки подключения — {details}. Проверьте IP PS4, настройку "
+            f"Enable BinLoader Server и Enable Rest Mode Support в GoldHEN."
         )
 
-    for _ in range(10):
+    # Payload был отправлен ровно один раз. Теперь ждём запуска его HTTP-сервера.
+    start_deadline = time.monotonic() + RPI_START_TIMEOUT
+    while time.monotonic() < start_deadline:
+        if is_port_open(ps4_ip, rpi_port, timeout=RPI_PROBE_TIMEOUT):
+            return True, f"Payload загружен через BinLoader :{connected_port}"
         time.sleep(0.5)
-        if is_port_open(ps4_ip, rpi_port, timeout=0.5):
-            return True, "Payload успешно загружен"
 
-    return False, "Payload отправлен, но порт 12800 не открылся вовремя"
+    return (
+        False,
+        f"Payload отправлен через BinLoader :{connected_port}, "
+        f"но RPI-порт {rpi_port} не открылся за {RPI_START_TIMEOUT:.0f} с. "
+        f"Возможна ошибка запуска payload или проблема восстановления GoldHEN после Rest Mode."
+    )
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -194,7 +249,17 @@ class Handler(SimpleHTTPRequestHandler):
 
                 for tok in expired:
                     PROGRESS_MAP.pop(tok, None)
+
+                expired_files = [
+                    tok
+                    for tok, last_access in FILES_LAST_ACCESS.items()
+                    if now - last_access > FILE_REGISTRATION_TTL
+                ]
+
+                for tok in expired_files:
                     FILES_MAP.pop(tok, None)
+                    FILES_LAST_ACCESS.pop(tok, None)
+                    PROGRESS_MAP.pop(tok, None)
 
                 snapshot = {
                     tok: {
@@ -306,6 +371,7 @@ class Handler(SimpleHTTPRequestHandler):
                         }
 
                         FILES_MAP[md5_token] = file_path
+                        FILES_LAST_ACCESS[md5_token] = created_at
 
                     single_url = (
                         f"http://{pc_ip}:{HTTP_PORT}"
@@ -351,20 +417,38 @@ class Handler(SimpleHTTPRequestHandler):
             .replace(".pkg", "")
         )
 
-        file_path = FILES_MAP.get(md5_token)
+        now = time.monotonic()
+
+        with PROGRESS_LOCK:
+            file_path = FILES_MAP.get(md5_token)
+            if file_path:
+                FILES_LAST_ACCESS[md5_token] = now
 
         if not file_path or not os.path.isfile(file_path):
+            print(f"[DEBUG 404] path={self.path} | token={md5_token} | file_path={file_path} | exists={os.path.exists(str(file_path))}")
             return self.send_error(404)
 
         file_size = os.path.getsize(file_path)
 
-        now = time.monotonic()
-
         with PROGRESS_LOCK:
-            for info in PROGRESS_MAP.values():
-                if not info.get("done"):
-                    info["started"] = True
-                    info["last_activity"] = now
+            info = PROGRESS_MAP.get(md5_token)
+
+            if info is None or info.get("done"):
+                info = {
+                    "name": os.path.basename(file_path),
+                    "total": file_size,
+                    "sent": 0,
+                    "speed": 0.0,
+                    "done": False,
+                    "finished_at": None,
+                    "created_at": now,
+                    "last_activity": now,
+                    "started": True,
+                }
+                PROGRESS_MAP[md5_token] = info
+            else:
+                info["started"] = True
+                info["last_activity"] = now
 
         range_bytes = self.headers.get("Range")
 
@@ -454,22 +538,20 @@ class Handler(SimpleHTTPRequestHandler):
                         now = time.monotonic()
 
                         with PROGRESS_LOCK:
-                            for info in PROGRESS_MAP.values():
-                                if not info.get("done"):
-                                    info["started"] = True
-                                    info["last_activity"] = now
+                            FILES_LAST_ACCESS[md5_token] = now
+                            info = PROGRESS_MAP.get(md5_token)
 
-                            if md5_token in PROGRESS_MAP:
-                                PROGRESS_MAP[md5_token]["sent"] = offset
+                            if info and not info.get("done"):
+                                info["started"] = True
+                                info["last_activity"] = now
+                                info["sent"] = offset
 
                                 if now - last_time >= 0.5:
                                     speed = (
                                         bytes_since_last / (1024 * 1024)
                                     ) / (now - last_time)
 
-                                    PROGRESS_MAP[md5_token]["speed"] = round(
-                                        speed, 1
-                                    )
+                                    info["speed"] = round(speed, 1)
 
                                     bytes_since_last = 0
                                     last_time = now
@@ -499,22 +581,20 @@ class Handler(SimpleHTTPRequestHandler):
                         now = time.monotonic()
 
                         with PROGRESS_LOCK:
-                            for info in PROGRESS_MAP.values():
-                                if not info.get("done"):
-                                    info["started"] = True
-                                    info["last_activity"] = now
+                            FILES_LAST_ACCESS[md5_token] = now
+                            info = PROGRESS_MAP.get(md5_token)
 
-                            if md5_token in PROGRESS_MAP:
-                                PROGRESS_MAP[md5_token]["sent"] = offset
+                            if info and not info.get("done"):
+                                info["started"] = True
+                                info["last_activity"] = now
+                                info["sent"] = offset
 
                                 if now - last_time >= 0.5:
                                     speed = (
                                         bytes_since_last / (1024 * 1024)
                                     ) / (now - last_time)
 
-                                    PROGRESS_MAP[md5_token]["speed"] = round(
-                                        speed, 1
-                                    )
+                                    info["speed"] = round(speed, 1)
 
                                     bytes_since_last = 0
                                     last_time = now
@@ -531,6 +611,7 @@ class Handler(SimpleHTTPRequestHandler):
 
                         PROGRESS_MAP[md5_token]["finished_at"] = finished_at
                         PROGRESS_MAP[md5_token]["last_activity"] = finished_at
+                        FILES_LAST_ACCESS[md5_token] = finished_at
 
                 if file_path in SELECTED_FILES:
                     SELECTED_FILES.remove(file_path)
