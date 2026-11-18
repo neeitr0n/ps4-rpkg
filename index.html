@@ -437,7 +437,7 @@ button {
     <div class="top-controls">
       <div class="ip-control">
         <label for="ps4ip" data-i18n="ipLabel">IP консоли</label>
-        <input id="ps4ip" type="text" value="192.168.2.10">
+        <input id="ps4ip" type="text" placeholder="192.168.1.1" autocomplete="off">
       </div>
 
       <div class="languages">
@@ -576,7 +576,7 @@ const elements = {
   send: document.getElementById("sendButton")
 };
 
-elements.ip.value = localStorage.getItem("ps4_rpi_ip") || "192.168.2.10";
+elements.ip.value = localStorage.getItem("ps4_rpi_ip") || "";
 
 elements.ip.addEventListener("change", () => {
   localStorage.setItem("ps4_rpi_ip", elements.ip.value.trim());
