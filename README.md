@@ -13,6 +13,8 @@ PS4-rPKG is a local network tool for sending and installing PKG packages from a 
 - Transfer package files over HTTP and display transfer progress.
 - Attempt to start RPI through BinLoader if the RPI service is not already available.
 - Installing games in Rest Mode (requires the "Stay Connected to the Internet" setting to be enabled)
+- Automatically detect an existing RPI instance and load the payload through BinLoader when needed.
+- No manual payload injection required for subsequent installations while RPI remains available.
 
 ## Requirements
 
@@ -21,6 +23,7 @@ PS4-rPKG is a local network tool for sending and installing PKG packages from a 
 - GoldHEN with a compatible Remote Package Installer (RPI) environment.
 - BinLoader enabled on the console if automatic RPI payload loading is needed.
 - Tkinter for the file selection dialog.
+- Automatically detect an existing RPI instance and load the payload through BinLoader when needed.
 
 The Python server uses the standard library and does not require third-party Python packages.
 
